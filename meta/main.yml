@@ -1,0 +1,17 @@
+---
+galaxy_info:
+  author: Fintech Devops
+  contributors:
+  description: Do blue-green launch-template deployment (a.k.a. rolling updates)
+  company: Traveloka
+  license: MIT
+  min_ansible_version: 2.5.8
+  platforms:
+    - name: Ubuntu
+      versions:
+        - trusty
+  categories:
+    - system
+    - deployment
+    - aws
+dependencies: []

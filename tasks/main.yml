@@ -1,0 +1,170 @@
+---
+- name: Get the AMI
+  ec2_ami_facts:
+    region: "{{ aws_region }}"
+    filters:
+      name: "tvlk/ubuntu-??/{{ product_domain }}/java-?-{{ service_name }}-{{ service_role }}-{{ service_version }}/*"
+  register: ami
+
+- name: Fail If the AMI Is Not Found
+  fail:
+    msg: "Got {{ ami.images|length }} AMI(s), expected 1. Please check `service_version` parameter."
+  when: ami.images|length != 1
+
+- name: Get the ASG
+  ec2_asg_facts:
+    region: "{{ aws_region }}"
+    name: "{{ asg_name }}"
+  register: asg
+
+- name: Fail If the ASG Is Not Found
+  fail:
+    msg: "Got {{ asg.results|length }} asg, expected 1. Please check `asg_name` parameter."
+  when: asg.results|length != 1
+
+- name: Get Launch Template Name (Plain Launch Template)
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    lt_name: "{{ asg.results[0].launch_template.launch_template_specification.launch_template_name }}"
+    lt_id: "{{ asg.results[0].launch_template.launch_template_specification.launch_template_id }}"
+  when: asg.results[0].LaunchTemplate is defined
+
+- name: Get Launch Template Name (mixed_instances_policy)
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    lt_name: "{{ asg.results[0].mixed_instances_policy.launch_template.launch_template_specification.launch_template_name }}"
+    lt_id: "{{ asg.results[0].mixed_instances_policy.launch_template.launch_template_specification.launch_template_id }}"
+  when: asg.results[0].mixed_instances_policy is defined
+
+- name: Fail If ASG is not using Launch Template
+  fail:
+    msg: "ASG is not using Launch template"
+  when: lt_name is not defined
+
+- name: Get the Launch Template data
+  command: aws ec2 describe-launch-template-versions --launch-template-name {{ lt_name }} --versions $Latest --region {{ aws_region }}
+  changed_when: false
+  register: lt_data_raw
+
+- name: Set launch template fact
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    lt_data: "{{ lt_data_raw.stdout | from_json }}"
+
+- name: Set new instance user data
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    new_instance_user_data: "{{ instance_user_data | b64encode }}"
+  when: instance_user_data is defined
+
+- name: Fail If no changes
+  fail:
+    msg: "No changes detected in service version or user_data"
+  when:
+    - lt_data.LaunchTemplateVersions[0].LaunchTemplateData.ImageId == ami.images[0].image_id
+    - new_instance_user_data is not defined or new_instance_user_data == lt_data.LaunchTemplateVersions[0].LaunchTemplateData.UserData
+
+- name: Set New Launch Template data
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    new_lt_data: "{{ lt_data.LaunchTemplateVersions[0] | combine(LaunchTemplateVersions, recursive=True) }}"
+  vars:
+    LaunchTemplateVersions:
+      - LaunchTemplateData:
+          ImageId: "{{ami.images[0].image_id}}"
+          UserData: "{{ new_instance_user_data | default(lt_data.LaunchTemplateVersions[0].LaunchTemplateData.UserData) }}"
+
+- name: Set New Launch Template version
+  command: >
+    aws ec2 create-launch-template-version --region {{ aws_region }} --launch-template-id {{ lt_id }}
+      --version-description {{ service_version }} --launch-template-data '{{ new_lt_data.LaunchTemplateData | to_json }}'
+  changed_when: false
+  when: new_lt_data is defined
+
+- name: Set ASG tags list to empty array.
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    asg_tags: []
+
+- name: Gather ASG tags
+  command: aws autoscaling describe-tags --filters Name=auto-scaling-group,Values={{ asg_name }} --region {{ aws_region }}
+  changed_when: false
+  register: asg_old_tags
+
+- name: Create new ASG tags
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    asg_tags: "{{ asg_tags + [ item ] }}"
+  with_items: "{{ asg_old_tags.stdout | from_json | json_query('Tags[*]')}}"
+  loop_control:
+    label: "{{ item.Key }}"
+  when:
+    - item.Key != "AmiId"
+    - item.Key != "ServiceVersion"
+
+- name: Update deployment related tags
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    asg_tags: "{{ asg_tags | default([]) + [ item ] }}"
+  loop_control:
+    label: "{{ item.Key }}"
+  with_items:
+    - {
+        PropagateAtLaunch: true,
+        ResourceId: "{{ asg_name }}",
+        ResourceType: "auto-scaling-group",
+        Key: "AmiId",
+        Value: "{{ ami.images[0].image_id }}",
+      }
+    - {
+        PropagateAtLaunch: true,
+        ResourceId: "{{ asg_name }}",
+        ResourceType: "auto-scaling-group",
+        Key: "ServiceVersion",
+        Value: "{{ service_version }}",
+      }
+    - {
+        PropagateAtLaunch: true,
+        ResourceId: "{{ asg_name }}",
+        ResourceType: "auto-scaling-group",
+        Key: "UpdatedBy",
+        Value: "ansible",
+      }
+
+- name: Set final ASG tags
+  set_fact:
+    key_value: "" # Temporary, https://github.com/VSChina/vscode-ansible/issues/261
+    asg_tags: { Tags: "{{ asg_tags }} " }
+
+- name: The Final tags to be updated to ASG
+  debug:
+    msg: "{{ asg_tags }}"
+    verbosity: 1
+
+- name: Update ASG tags
+  command: aws autoscaling create-or-update-tags --region {{ aws_region }} --cli-input-json '{{ asg_tags | to_json }}'
+  changed_when: false
+
+- name: Start rolling update deployment
+  command: aws autoscaling start-instance-refresh --region {{ aws_region }} --cli-input-json '{{ lookup('template', './instance_refresh.j2') | to_json }}' --output text
+  changed_when: false
+  register: instance_refresh_task
+
+- name: Instance refresh id
+  debug:
+    msg: "{{ instance_refresh_task.stdout }}"
+    verbosity: 1
+
+- name: Wait for instance refresh result
+  command: >
+    aws autoscaling describe-instance-refreshes --auto-scaling-group-name {{ asg_name }}
+      --instance-refresh-ids {{ instance_refresh_task.stdout }} --query 'InstanceRefreshes[0].Status' --output text
+  register: instance_refresh_status
+  changed_when: false
+  failed_when: instance_refresh_status.stdout != "Successful"
+  retries: "{{ deployment_timeout_retries | default(20) | int }}"
+  delay: "{{ deployment_timeout_delay | default(30) | int }}"
+  until:
+    - instance_refresh_status.stdout != "Pending"
+    - instance_refresh_status.stdout != "InProgress"
+    - instance_refresh_status.stdout != "Cancelling"

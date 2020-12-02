@@ -1,0 +1,38 @@
+---
+- hosts: localhost
+  connection: local
+  vars:
+    # set common_java_opts in the supervisor config when baking the AMI!
+    app_memory_java_opts: >-
+      -Xmx1g
+    traveloka_env: stg
+    traveloka_maintenance_mode: false
+  roles:
+    - role: ../../
+      aws_region: ap-southeast-1
+      product_domain: pay
+      service_name: payepg
+      service_role: app
+      service_version: 95ceca4b
+      asg_name: payepg-app-c2f1e6e38d37035d20200914092617923700000002
+      instance_user_data: |
+        #cloud-config
+        write_files:
+          - content: |
+                [Service]
+                Environment="JAVA_OPTS={{ app_memory_java_opts }}"
+                Environment="TRAVELOKA_ENV={{ traveloka_env }}"
+                Environment="TRAVELOKA_MAINTENANCE_MODE={{ traveloka_maintenance_mode }}"
+                Environment="TRAVELOKA_ADDITIONAL_CONFIG_ENV=MultiAccount"
+            path: /etc/systemd/system/supervisor.service.d/override.conf
+            permissions: "0750"
+            owner: root:root
+        runcmd:
+          - systemctl enable supervisor
+          - systemctl start supervisor
+          - 'sed -i -e "s@api_key:.*@api_key: $(aws ssm get-parameters --name /tvlk-secret/shared/pay/datadog.api.key --with-decryption --query Parameters[0].Value --output text --region ap-southeast-1)@" /etc/dd-agent/datadog.conf'
+          - systemctl restart datadog-agent
+      ## TO DO
+      # min_capacity:
+      # max_capacity:
+      # desired_capacity:

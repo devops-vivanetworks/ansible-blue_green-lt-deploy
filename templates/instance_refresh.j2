@@ -1,0 +1,7 @@
+{
+  "AutoScalingGroupName": "{{ asg_name }}",
+  "Preferences": {
+    "InstanceWarmup": {{ (instance_warmup | default(asg.results[0].health_check_grace_period)) | int }},
+    "MinHealthyPercentage": {{ (min_healthy_percentage | default(50)) | int }}
+  }
+}
